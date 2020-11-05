@@ -26,7 +26,7 @@ def main():
     set_seed(1992)
     hidden_size = 128
     learning_rate=3e-4
-    num_epochs = 5
+    num_epochs = 10
     train_iter, val_iter, SRC, TRG = make_datasets(TRAIN, VAL, TEST)
     learning_rate = 1e-3
 
