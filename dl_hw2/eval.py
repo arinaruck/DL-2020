@@ -8,9 +8,10 @@ from torch import optim
 import torch.nn.functional as F
 from torchtext import data, datasets
 from torchtext.data import Iterator, BucketIterator
+from model import Transformer
 
 MAX_LENGTH=90
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 def from_tokens(tokens, SRC, TRG):
     return ' '.join(TRG.vocab.itos[tok] for tok in tokens) 
@@ -19,59 +20,78 @@ def from_tokens(tokens, SRC, TRG):
 def to_tokens(sentence, SRC, TRG):
     tokens = [SRC.vocab.stoi['<sos>']] + [SRC.vocab.stoi[token.lower()] for token in sentence.split()]\
     + [SRC.vocab.stoi['<eos>']]
-    source = torch.LongTensor(tokens).unsqueeze(0).to(device)
+    source = torch.LongTensor(tokens).unsqueeze(0).to(DEVICE)
     return source
 
 
-def evaluate(encoder, decoder, input_tensor, SRC, TRG,  max_length=MAX_LENGTH):
-    encoder.eval()
-    decoder.eval()
-
-    SOS_token, EOS_token, PAD_token = TRG.vocab.stoi['<sos>'], TRG.vocab.stoi['<eos>'], TRG.vocab.stoi['<pad>']
-
-    with torch.no_grad():
-        batch_size = input_tensor.size()[0]
-        input_length = input_tensor.size()[1]
-        encoder_hidden = encoder.initHidden(batch_size)
-        encoder_outputs = torch.full((batch_size, max_length, encoder.hidden_size),
-                                 PAD_token, dtype=torch.float32, device=device)
-
-        for ei in range(input_length):
-            encoder_output, encoder_hidden = encoder(input_tensor[:, ei].unsqueeze(0),
-                                                     encoder_hidden)
-            encoder_outputs[:, ei] = encoder_output
-
-        decoder_input = torch.full((1, batch_size), SOS_token, dtype=torch.int64, device=device)
-
-        decoder_hidden = encoder_hidden
-
-        decoded_words = []
-        decoder_attentions = torch.zeros(batch_size, max_length, max_length)
-
-        for di in range(max_length):
-            decoder_output, decoder_hidden, decoder_attention = decoder(
-                decoder_input, decoder_hidden, encoder_outputs)
-            decoder_attentions[:, di] = decoder_attention.data
-            topv, topi = decoder_output.topk(1)
-            if topi.item() == EOS_token:
-                decoded_words.append('<eos>')
-                break
-            else:
-                decoded_words.append(TRG.vocab.itos[topi.item()])
-
-            decoder_input = topi.detach()
-        return decoded_words, decoder_attentions[:, :di + 1]
+def greedy_decode(model, src, src_mask, max_len, TRG):
+    embedded_src = model.src_embedding(src)
+    enc = model.encoder(embedded_src, src_mask)
+    ys = torch.LongTensor([[TRG.vocab.stoi['<sos>']]]).to(DEVICE)
+    for i in range(1, max_len):
+        embedded_trg = model.trg_embedding(ys)
+        out = model.decoder(embedded_trg, enc, src_mask, subsequent_mask(i).to(DEVICE))
+        prob = model.proj(out)
+        _, next_word = torch.max(prob, dim = -1)
+        next_word = next_word[:, -1].item()
+        ys = torch.cat([ys, torch.LongTensor([[next_word]]).to(DEVICE)], dim=1)
+        if next_word == TRG.vocab.stoi['<eos>']:
+          break
+    return ys.squeeze(0)
 
 
-def make_predictions(filename, encoder, decoder, SRC, TRG, val=False):
+def beam_search_decode(model, src, src_mask, max_len, beam_width, TGT):
+    to_prob = nn.Softmax(dim=-1).to(DEVICE)
+    embedded_src = model.src_embedding(src)
+    enc = model.encoder(embedded_src, src_mask)
+    preds = torch.LongTensor([[TGT.vocab.stoi['<sos>']]])
+    probs = torch.Tensor([[1.0]])
+    eos_idx, pad_idx = TGT.vocab.stoi['<eos>'], TGT.vocab.stoi['<pad>']
+    for i in range(1, max_len):
+        curr_preds = torch.LongTensor([])
+        curr_probs = torch.LongTensor([])
+        for y, y_prob in zip(preds, probs):
+            if y[-1].item() in [pad_idx, eos_idx]:
+                word = torch.LongTensor([pad_idx])
+                prediction = torch.cat([y, word])
+                curr_preds = torch.cat([curr_preds, prediction.unsqueeze(0)], dim=0)
+                curr_probs = torch.cat([curr_probs, y_prob.unsqueeze(0)], dim=0)
+                continue
+            embedded_trg = model.trg_embedding(y.to(DEVICE))
+            out = model.decoder(embedded_trg, enc, src_mask, subsequent_mask(i).to(DEVICE))
+            prob = to_prob(model.proj(out)).detach().cpu()
+            word_probs, words = torch.topk(prob, k=beam_width, dim=-1)
+            word_prob, word = word_probs[:, -1], words[:, -1]
+            prediction = torch.cat([y.repeat(beam_width, 1), word.T], dim=1)
+            curr_preds = torch.cat([curr_preds, prediction], dim=0)
+            curr_probs = torch.cat([curr_probs, word_prob.T * y_prob], dim=0)
+        probs, idx = torch.topk(curr_probs, k=beam_width, dim=0)
+        idx = idx.squeeze()
+        preds = curr_preds[idx, :]
+    return preds[0]
+
+
+def make_predictions(config, filename, SRC, TRG, val=False):
+    model = Transformer(config).to(config['device'])
+    model.load_state_dict(torch.load(config[checkpoint])['model_state_dict'])
+    model.eval()
+
     preds = []
     suffix = '_pred' if val else ''
     with open(f'{filename}.de', 'r') as in_file:
         lines = in_file.readlines()
         for line in lines:
-            tokens = to_tokens(line, SRC, TRG)
-            output_words, _ = evaluate(encoder, decoder, tokens, SRC, TRG)
-            preds.append(' '.join(output_words[1:-1]))
+            src = to_tokens(line, SRC, TGT)
+            src_mask = src != SRC.vocab.stoi["<pad>"]
+            out = beam_search_decode(model, src, src_mask, max_len=MAX_LENGTH, TGT=TGT, beam_width=config['beam_width'])
+            output_words = []
+            for j in range(1, out.shape[0]):
+                sym = TGT.vocab.itos[out[j]]
+                if sym == "<eos>": break
+                if sym == "<pad>": continue
+                output_words.append(sym)
+            test_preds.append(' '.join(output_words))
     with open(f'{filename}{suffix}.en', 'w') as out_file:
         out_file.write('\n'.join(preds))
+        out_file.write('\n')
 

@@ -4,79 +4,171 @@ import torch
 import numpy as np
 import random
 
-MAX_LENGTH = 90
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class EncoderRNN(nn.Module):
-    def __init__(self, input_size, hidden_size):
-        super(EncoderRNN, self).__init__()
-        self.hidden_size = hidden_size
-        self.embedding = nn.Embedding(input_size, hidden_size)
-        self.gru = nn.GRU(hidden_size, hidden_size)
+class FeedForward(nn.Module):
+    def __init__(self, config):
+        super(FeedForward, self).__init__()
+        self.ffd = nn.Sequential(
+            nn.Linear(config['d_model'], config['d_ffd']),
+            nn.ReLU(),
+            nn.Dropout(config['dropout']),
+            nn.Linear(config['d_ffd'], config['d_model'])                  
+        )
+    
+    def forward(self, x):
+        x = self.ffd(x)
+        return x
 
-    def forward(self, input, hidden):
-        embedded = self.embedding(input)
-        output = embedded
-        output, hidden = self.gru(output, hidden)
-        return output, hidden
 
-    def initHidden(self, b_s):
-        return torch.zeros(1, b_s, self.hidden_size, device=device)
+class MultiHeadAttention(nn.Module):
+    def __init__(self, config):
+        super(MultiHeadAttention, self).__init__()
+        d_model, d_k, d_v = config['d_model'], config['d_k'], config['d_v']
+        n_heads = config['n_heads']
+        self.n_heads = n_heads
+        self.d_k = d_k
+        self.d_v = d_v
+        self.K = nn.Linear(d_model, d_k * n_heads)
+        self.Q = nn.Linear(d_model, d_k * n_heads)
+        self.V = nn.Linear(d_model, d_v * n_heads)
+        self.proj = nn.Linear(n_heads * d_v, d_model)
+        self.dropout = nn.Dropout(config['dropout'])
+    
+    def forward(self, x_k, x_q, x_v, mask):
+        b_sz, seq_len, emb_dim = x_k.shape
+        key = self.K(x_k).view(b_sz, -1, self.n_heads, self.d_k).transpose(1, 2)
+        query = self.Q(x_q).view(b_sz, -1, self.n_heads, self.d_k).transpose(1, 2)
+        value = self.V(x_v).view(b_sz, -1, self.n_heads, self.d_k).transpose(1, 2)
+        logits = torch.matmul(query, key.transpose(-1, -2)) / np.sqrt(self.d_k)
+        mask = mask.unsqueeze(1)
+        logits = logits.masked_fill(~mask, -1e15)
+        probs = F.softmax(logits, dim=-1)
+        z = torch.matmul(self.dropout(probs), value)
+        z = z.transpose(1, 2).contiguous().view(b_sz, -1, self.n_heads * self.d_v)
+        z = self.proj(z)
+        return z
 
-   
-class AttnDecoderRNN(nn.Module):
-    def __init__(self, hidden_size, output_size, dropout_p=0.1, max_length=MAX_LENGTH):
-        super(AttnDecoderRNN, self).__init__()
-        self.hidden_size = hidden_size
-        self.output_size = output_size
-        self.dropout_p = dropout_p
-        self.max_length = max_length
 
-        self.embedding = nn.Embedding(self.output_size, self.hidden_size)
-        self.attn = nn.Linear(self.hidden_size * 2, self.max_length)
-        self.attn_combine = nn.Linear(self.hidden_size * 2, self.hidden_size)
-        self.dropout = nn.Dropout(self.dropout_p)
-        self.gru = nn.GRU(self.hidden_size, self.hidden_size)
-        self.out = nn.Linear(self.hidden_size, self.output_size)
-        self.relu = nn.ReLU()
-        self.log_softmax = nn.LogSoftmax(dim=1)
-        self.softmax = nn.Softmax(dim=1)
+class EncoderBlock(nn.Module):
+    def __init__(self, config):
+        super(EncoderBlock, self).__init__()
+        self.self_attn = MultiHeadAttention(config)
+        self.layer_norm_attn = nn.LayerNorm(config['d_model'])
+        self.feed_forward = FeedForward(config)
+        self.layer_norm_ffd = nn.LayerNorm(config['d_model'])
+        self.dropout = nn.Dropout(config['dropout'])
 
-    def forward(self, input, hidden, encoder_outputs):
-        embedded = self.embedding(input)
-        embedded = self.dropout(embedded)
+    def forward(self, x, mask):
+        z = self.layer_norm_attn(x)
+        x = x + self.self_attn(z, z, z, mask)
+        z = self.layer_norm_ffd(x)
+        x = x + self.dropout(self.feed_forward(z))
+        return x
 
-        attn_weights = self.softmax(
-            self.attn(torch.cat((embedded[0], hidden[0]), 1)))
+
+class Encoder(nn.Module):
+    def __init__(self, config):
+        super(Encoder, self).__init__()
+        n_blocks = config['n_blocks']
+        self.blocks = nn.ModuleList([EncoderBlock(config) for _ in range(n_blocks)])
+        self.layer_norm = nn.LayerNorm(config['d_model'])
         
-        attn_applied = torch.bmm(attn_weights.unsqueeze(1),
-                                 encoder_outputs).transpose(1, 0)
+    def forward(self, x, src_mask):
+        for enc_block in self.blocks:
+            x = enc_block(x, src_mask)
+        return self.layer_norm(x)
 
-        output = torch.cat((embedded[0], attn_applied[0]), 1)
-        output = self.attn_combine(output).unsqueeze(0)
 
-        output = self.relu(output)
-        output, hidden = self.gru(output, hidden)
+class DecoderBlock(nn.Module):
+    def __init__(self, config):
+        super(DecoderBlock, self).__init__()
+        self.self_attn = MultiHeadAttention(config)
+        self.layer_norm_s_attn = nn.LayerNorm(config['d_model'])
+        self.enc_dec_attn = MultiHeadAttention(config)
+        self.layer_norm_ed_attn = nn.LayerNorm(config['d_model'])
+        self.feed_forward = FeedForward(config)
+        self.layer_norm_ffd = nn.LayerNorm(config['d_model'])
+        self.dropout = nn.Dropout(config['dropout'])
+ 
+    def forward(self, x, enc, src_mask, trg_mask):
+        z = self.layer_norm_s_attn(x)
+        x = x + self.self_attn(z, z, z, trg_mask)
+        z = self.layer_norm_ed_attn(x)
+        x =  x + self.enc_dec_attn(enc, z, enc, src_mask)
+        z = self.layer_norm_ffd(x)
+        x = x + self.dropout(self.feed_forward(z))
+        return x
 
-        output = self.log_softmax(self.out(output[0]))
-        return output, hidden, attn_weights
 
-    def initHidden(self, b_s):
-        return torch.zeros(1, b_s, self.hidden_size, device=device)
+class Decoder(nn.Module):
+    def __init__(self, config):
+        super(Decoder, self).__init__()
+        n_blocks = config['n_blocks']
+        self.blocks = nn.ModuleList([DecoderBlock(config) for _ in range(n_blocks)])
+        self.layer_norm = nn.LayerNorm(config['d_model'])
+        
+    def forward(self, x, enc, src_mask, tgt_mask):
+        for dec_block in self.blocks:
+            x = dec_block(x, enc, src_mask, tgt_mask)
+        return self.layer_norm(x)
+
+
+def make_pos_emb(max_len, emb_dim, d_model):
+    embedding = torch.zeros((max_len, emb_dim))
+    pos = torch.arange(max_len).unsqueeze(1)
+    freq =  torch.exp(torch.arange(0, d_model, 2) *
+                             -(np.log(10000.0) / d_model)).unsqueeze(0)
+    args = pos * freq
+    embedding[:, 0::2] = torch.sin(args)
+    embedding[:, 1::2] = torch.cos(args)
+    return embedding.unsqueeze(0)
+
+
+class Embedding(nn.Module):
+    def __init__(self, config, vocab_size):
+        super(Embedding, self).__init__()
+        emb_dim = config['emb_dim']
+        max_len = config['max_len']
+        d_model = config['d_model']
+        dropout = config['emb_dropout']
+        self.d_model = d_model
+        self.embed = nn.Embedding(vocab_size, emb_dim)
+        self.pos_embed = make_pos_emb(max_len, emb_dim, d_model).to(config['device'])
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, x):
+        seq_len = x.shape[-1]
+        x = self.dropout(self.embed(x) * np.sqrt(self.d_model)
+        + self.pos_embed[:, : seq_len,:])
+        return x
+
+
+class Transformer(nn.Module):
+    def __init__(self, config):
+        super(Transformer, self).__init__()
+        self.config = config
+        emb_dim = config['emb_dim']
+        max_len = config['max_len']
+        d_model = config['d_model']
+        self.src_embedding = Embedding(config, config['src_vocab'])
+        self.trg_embedding = Embedding(config, config['trg_vocab'])
+        self.encoder = Encoder(config)
+        self.decoder = Decoder(config)
+        self.proj = nn.Linear(d_model, config['trg_vocab'])
+
+
+    def forward(self, src, trg, src_mask, trg_mask):
+        src_emb = self.src_embedding(src)
+        trg_emb = self.trg_embedding(trg)
+        encoded = self.encoder(src_emb, src_mask)
+        decoded = self.decoder(trg_emb, encoded, src_mask, trg_mask)
+        return self.proj(decoded)
 
 
 class EarlyStopping:
     def __init__(self, checkpoint, patience=7, verbose=True, delta=0, min_loss=np.inf):
-        """
-        :param
-            patience (int): How long to wait after last time validation loss improved.
-                            Default: 7
-            verbose (bool): If True, prints a message for each validation loss improvement.
-                            Default: False
-            delta (float): Minimum change in the monitored quantity to qualify as an improvement.
-                            Default: 0
-        """
         self.patience = patience
         self.verbose = verbose
         self.counter = 0
@@ -104,17 +196,32 @@ class EarlyStopping:
             self.counter = 0
 
     def save_checkpoint(self, val_loss, model, optimizer, scheduler, epoch):
-        """
-        Saves model when validation loss decrease.
-        """
+
         if self.verbose:
             print(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
         torch.save({
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
+            #'scheduler_state_dict': scheduler.state_dict(),
             'loss': val_loss
             }, self.checkpoint)
 
         self.val_loss_min = val_loss
+
+
+class CECriterion(nn.Module):
+    def __init__(self, pad_idx):
+        super(CECriterion, self).__init__()
+        self.pad_idx = pad_idx
+        self.criterion = nn.CrossEntropyLoss(reduction='sum', ignore_index=pad_idx)
+        
+    def forward(self, x, target):
+        x = x.contiguous().permute(0,2,1)
+        ntokens = (target != self.pad_idx).data.sum()
+        return self.criterion(x, target) / ntokens
+
+
+def init_weights(model):
+    if hasattr(model, 'weight') and model.weight.dim() > 1:
+        nn.init.xavier_uniform_(model.weight.data)

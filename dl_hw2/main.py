@@ -8,39 +8,62 @@ from torch import optim
 import torch.nn.functional as F
 from torchtext import data, datasets
 from torchtext.data import Iterator, BucketIterator
-from train import set_seed, train, init_weights
-from model import EncoderRNN, AttnDecoderRNN
+from train import set_seed, train
+from model import Transformer, CECriterion, init_weights
 from load_data import make_datasets
 import numpy as np
 from eval import make_predictions
 
 from tqdm import tqdm
 
-MAX_LENGTH = 90
 TRAIN = 'homework_machine_translation_de-en/train.de-en'
 VAL = 'homework_machine_translation_de-en/val.de-en'
 TEST = 'homework_machine_translation_de-en/test1.de-en'
+d_model = 256
+BATCH_SIZE = 48
+MAX_LENGTH = 85
+lr = 3e-4
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+config = {
+            'batch_size': BATCH_SIZE,
+            'd_model': d_model,
+            'max_len': MAX_LENGTH,
+            'n_heads': 4, 
+            'n_blocks': 4, 
+            'd_ffd': 4 * d_model,
+            'emb_dim': d_model,
+            'emb_dropout': 0,
+            'd_k': d_model // 4,
+            'd_v': d_model // 4, 
+            'src_vocab': len(SRC.vocab),
+            'trg_vocab': len(TRG.vocab),
+            'dropout' : 0,
+            'num_epochs': 10,
+            'device': device,
+            'lr': lr,
+            'optimizer': 'Adam',
+            'beam_width': 8,
+            'seed': 1992,
+            'checkpoint': 'checkpoint.pt'
+        }
+
 
 def main():
     set_seed(1992)
-    hidden_size = 128
-    learning_rate=3e-4
-    num_epochs = 10
-    train_iter, val_iter, SRC, TRG = make_datasets(TRAIN, VAL, TEST)
-    learning_rate = 1e-3
+    train_iter, val_iter, SRC, TRG = make_datasets(TRAIN, VAL)
 
-    encoder = EncoderRNN(len(SRC.vocab), hidden_size).to(device)
-    attn_decoder = AttnDecoderRNN(hidden_size, len(TRG.vocab), dropout_p=0.1).to(device)
+    model = Transformer(config).to(device)
+    model.apply(init_weights)
+    model.proj.weight = model.trg_embedding.embed.weight
 
-    encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate)
-    decoder_optimizer = optim.Adam(attn_decoder.parameters(), lr=learning_rate)
+    criterion = CECriterion(TGT.vocab.stoi['<pad>'])
+    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
 
-    criterion = nn.NLLLoss(ignore_index=TRG.vocab.stoi['<pad>'])
-    train(num_epochs, train_iter, encoder, attn_decoder, encoder_optimizer, decoder_optimizer, criterion, 
-          SRC, TRG, max_length=MAX_LENGTH)
-    make_predictions(VAL, encoder, attn_decoder, SRC, TRG, val=True)
-    make_predictions(TEST, encoder, attn_decoder, SRC, TRG)
+    train(config, model, criterion, optimizer, train_iter, valid_iter)
+    make_predictions(config, VAL, SRC, TRG, val=True)
+    make_predictions(config, TEST, SRC, TRG)
 
 
 main()
