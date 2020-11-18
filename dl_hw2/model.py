@@ -35,6 +35,7 @@ class MultiHeadAttention(nn.Module):
         self.V = nn.Linear(d_model, d_v * n_heads)
         self.proj = nn.Linear(n_heads * d_v, d_model)
         self.dropout = nn.Dropout(config['dropout'])
+        self.to_prob = nn.Softmax(dim=-1)
     
     def forward(self, x_k, x_q, x_v, mask):
         b_sz, seq_len, emb_dim = x_k.shape
@@ -44,7 +45,7 @@ class MultiHeadAttention(nn.Module):
         logits = torch.matmul(query, key.transpose(-1, -2)) / np.sqrt(self.d_k)
         mask = mask.unsqueeze(1)
         logits = logits.masked_fill(~mask, -1e15)
-        probs = F.softmax(logits, dim=-1)
+        probs = self.to_prob(logits)
         z = torch.matmul(self.dropout(probs), value)
         z = z.transpose(1, 2).contiguous().view(b_sz, -1, self.n_heads * self.d_v)
         z = self.proj(z)

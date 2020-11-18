@@ -1,6 +1,8 @@
 from torchtext import data, datasets
 from torchtext.data import Iterator, BucketIterator
-import torch from torch.nn.utils.rnn import pad_sequence
+import torch 
+from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import DataLoader
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -83,7 +85,7 @@ def make_datasets(config, train, val):
                                                            batch_sizes=(config['batch_size'], config['batch_size']), 
                                       sort_key=lambda x: len(x.src) + len(x.trg),
                                       shuffle=True,
-                                      device=DEVICE,
+                                      device=config['device'],
                                       sort_within_batch=False)
                                      
     train_iter = BucketIteratorWrapper(train_iter)

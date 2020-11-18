@@ -22,9 +22,10 @@ TEST = 'homework_machine_translation_de-en/test1.de-en'
 d_model = 256
 BATCH_SIZE = 48
 MAX_LENGTH = 85
-lr = 3e-4
+lr = 1e-3
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 config = {
             'batch_size': BATCH_SIZE,
@@ -34,17 +35,14 @@ config = {
             'n_blocks': 4, 
             'd_ffd': 4 * d_model,
             'emb_dim': d_model,
-            'emb_dropout': 0,
+            'emb_dropout': 0.4,
             'd_k': d_model // 4,
             'd_v': d_model // 4, 
-            'src_vocab': len(SRC.vocab),
-            'trg_vocab': len(TRG.vocab),
             'dropout' : 0,
             'num_epochs': 10,
             'device': device,
             'lr': lr,
             'optimizer': 'Adam',
-            'beam_width': 8,
             'seed': 1992,
             'checkpoint': 'checkpoint.pt'
         }
@@ -52,16 +50,19 @@ config = {
 
 def main():
     set_seed(1992)
-    train_iter, val_iter, SRC, TRG = make_datasets(TRAIN, VAL)
+    train_iter, val_iter, SRC, TRG = make_datasets(config, TRAIN, VAL)
+
+    config['src_vocab'] = len(SRC.vocab)
+    config['trg_vocab'] = len(TRG.vocab)
 
     model = Transformer(config).to(device)
     model.apply(init_weights)
     model.proj.weight = model.trg_embedding.embed.weight
 
-    criterion = CECriterion(TGT.vocab.stoi['<pad>'])
+    criterion = CECriterion(TRG.vocab.stoi['<pad>'])
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
 
-    train(config, model, criterion, optimizer, train_iter, valid_iter)
+    train(config, model, criterion, optimizer, train_iter, val_iter)
     make_predictions(config, VAL, SRC, TRG, val=True)
     make_predictions(config, TEST, SRC, TRG)
 
