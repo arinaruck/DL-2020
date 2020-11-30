@@ -1,4 +1,3 @@
-import wandb
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,7 +9,6 @@ from torch.utils.data import Dataset, DataLoader, random_split
 import torchvision.transforms as transforms
 import torchvision.models as models
 import random
-from tqdm.notebook import tqdm
 
 from PIL import Image
 import numpy as np
