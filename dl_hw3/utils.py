@@ -5,7 +5,7 @@ import numpy as np
 import random
 import os
 from dataclasses import dataclass
-
+from typing import List, Tuple
 
 @dataclass
 class Config:

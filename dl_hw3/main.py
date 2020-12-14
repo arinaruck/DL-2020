@@ -1,6 +1,6 @@
 import torch
 import subprocess
-from utils import seed_torch, EarlyStopping, Config
+from utils import seed_torch, EarlyStopping, Config, count_parameters
 from load_data import make_loader
 from train import train
 from model import UNet, Discriminator
@@ -16,20 +16,22 @@ config = Config(
 
 
 def main():
-	SEED=1992
-	seed_torch(SEED)
+    subprocess.run(['bash', 'download.sh'])
+    SEED=1992
+    seed_torch(SEED)
 
-	generator = UNet(config).to(config.device)
-	discriminator = Discriminator(config).to(config.device)
-	print(f'total parameters in generator: {count_parameters(generator)}, in discriminator: {count_parameters(discriminator)}')
-	models = [generator, discriminator]
+    generator = UNet(config).to(config.device)
+    discriminator = Discriminator(config).to(config.device)
+    print(f'total parameters in generator: {count_parameters(generator)}, in discriminator: {count_parameters(discriminator)}')
+    models = [generator, discriminator]
 
-	optimizer_G = torch.optim.Adam(generator.parameters(), lr=4e-4, weight_decay=1e-6)
-	optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=4e-4, weight_decay=1e-6)
-	optimizers = [optimizer_G, optimizer_D]
+    optimizer_G = torch.optim.Adam(generator.parameters(), lr=4e-4, weight_decay=1e-6)
+    optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=4e-4, weight_decay=1e-6)
+    optimizers = [optimizer_G, optimizer_D]
 
-	train_loader, val_loader = make_loader(root, modes=['train', 'val'], bs=16)
-	train(config, models, optimizers, schedulers, train_loader, val_loader)
+    root = 'facades'
+    train_loader, val_loader = make_loader(root, modes=['train', 'val'], bs=16)
+    train(config, models, optimizers, train_loader, val_loader)
 
 
 if __name__ == '__main__':

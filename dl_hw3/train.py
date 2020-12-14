@@ -1,8 +1,9 @@
 import torch
+import torchvision.transforms as transforms
 from utils import PSNR, SSIM
 
 
-def train(config, models, optimizers, schedulers, train_loader, val_loader=None):
+def train(config, models, optimizers, train_loader, val_loader=None):
     epochs = config.epochs
 
     gan_criterion = torch.nn.BCEWithLogitsLoss().to(config.device)
