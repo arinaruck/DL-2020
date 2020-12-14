@@ -4,16 +4,18 @@ import torch.nn.functional as F
 import numpy as np
 import random
 import os
-import torch.nn as nn
 from dataclasses import dataclass
 
 
 @dataclass
 class Config:
-    up: 'list[tuple[int, int]]'
-    down: 'list[tuple[int, int]]'
-    dropout_p: 'list[float]'
+    up: List[Tuple[int, int]]
+    down: List[Tuple[int, int]]
+    discriminator: List[Tuple[int, int]]
+    dropout_p: List[float]
     n_layers: int
+    discriminator_layers: int
+    lmbd: float
     epochs: int
     device: 'torch.device' = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -83,5 +85,45 @@ class EarlyStopping:
 
         self.val_loss_min = val_loss
 
+
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def gaussian(window_size, sigma):
+    gauss_k = torch.exp(- (torch.arange(window_size) - window_size // 2)**2 / (2 * sigma**2))
+    return gauss_k / gauss_k.sum()
+
+def create_window(window_size, ch):
+    g = gaussian(window_size, 1.5).unsqueeze(1)
+    window = torch.matmul(g, g.T).unsqueeze(0).unsqueeze(0)
+    window = window.expand(ch, 1, window_size, window_size).contiguous()
+    return window
+
+def SSIM(x, y, window_size=11):
+    c1 = 1e-4
+    c2 = 9e-4
+
+    ch = x.shape[1]
+    window = create_window(window_size, ch).to(x.device)
+   
+    mu_x = F.conv2d(x, window, padding = window_size // 2, groups = ch)
+    mu_y = F.conv2d(y, window, padding = window_size // 2, groups = ch)
+
+    mu_x_sq = torch.square(mu_x)
+    mu_y_sq = torch.square(mu_y)
+    mu_xy = mu_x * mu_y
+
+    var_x = F.conv2d(x * x, window, padding = window_size // 2, groups = ch) - mu_x_sq
+    var_y = F.conv2d(y * y, window, padding = window_size // 2, groups = ch) - mu_y_sq
+    cov = F.conv2d(x * y, window, padding = window_size // 2, groups = ch) - mu_xy
+
+    num = (2 * mu_xy + c1) * (2 * cov + c2)
+    denom = (mu_x_sq + mu_y_sq + c1) * (var_x + var_y + c2)
+    ssim = num / denom
+    return torch.mean(ssim)
+
+def PSNR(x, y):
+    mse = torch.mean(torch.square(x - y))
+    return 20 * torch.log10(255.0 / torch.sqrt(mse))
+
